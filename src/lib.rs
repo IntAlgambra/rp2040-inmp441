@@ -6,6 +6,16 @@ use rp2040_hal::dma::double_buffer::{Transfer, WriteNext};
 use rp2040_hal::dma::{double_buffer, SingleChannel};
 use rp2040_hal::pio::{PIOExt, Rx, ShiftDirection, StateMachineIndex, UninitStateMachine, PIO};
 
+pub enum DriverMode {
+    MonoLeft,
+    MonoRight,
+    Stereo,
+}
+
+pub enum DriverError {
+    NotInitialized,
+}
+
 pub struct INMP441<
     P: PIOExt,
     S: StateMachineIndex,
@@ -16,6 +26,11 @@ pub struct INMP441<
     dma_transfer: Option<
         Transfer<CH1, CH2, Rx<(P, S)>, &'static mut [u32; N], WriteNext<&'static mut [u32; N]>>,
     >,
+    i2s_clock_pin: u8,
+    i2s_ws_pin: u8,
+    i2s_data_pin: u8,
+    system_clock_freq: u32,
+    sampling_rate: u32,
 }
 
 impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, const N: usize>
@@ -25,15 +40,28 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
         clck_pin: u8,
         ws_pin: u8,
         data_pin: u8,
+        system_clock_freq: u32,
+        sampling_rate: u32,
+    ) -> INMP441<P, S, CH1, CH2, N> {
+        INMP441 {
+            dma_transfer: None,
+            i2s_clock_pin: clck_pin,
+            i2s_ws_pin: ws_pin,
+            i2s_data_pin: data_pin,
+            system_clock_freq,
+            sampling_rate,
+        }
+    }
+
+    pub fn init(
+        &mut self,
         pio: &mut PIO<P>,
         sm: UninitStateMachine<(P, S)>,
         dma_channel_1: CH1,
         dma_channel_2: CH2,
         rx_buf_1: &'static mut [u32; N],
         rx_buf_2: &'static mut [u32; N],
-        system_clock_freq: u32,
-        sampling_rate: u32,
-    ) -> INMP441<P, S, CH1, CH2, N> {
+    ) {
         let program = pio_asm!(
             // 0 | 00: ws 0 clock 0
             // 1 | 01: ws 1 clock 0
@@ -54,25 +82,24 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
             ".wrap",
         );
         let installed = pio.install(&program.program).unwrap();
-        let (int, frac) = Self::calculate_pio_clock_dividers(system_clock_freq, sampling_rate);
+        let (int, frac) =
+            Self::calculate_pio_clock_dividers(self.system_clock_freq, self.sampling_rate);
         let (mut sm, rx, _) = hal::pio::PIOBuilder::from_installed_program(installed)
-            .side_set_pin_base(ws_pin)
-            .in_pin_base(data_pin)
+            .side_set_pin_base(self.i2s_ws_pin)
+            .in_pin_base(self.i2s_data_pin)
             .clock_divisor_fixed_point(int, frac)
             .in_shift_direction(ShiftDirection::Left)
             .build(sm);
         sm.set_pindirs([
-            (clck_pin, hal::pio::PinDir::Output),
-            (ws_pin, hal::pio::PinDir::Output),
-            (data_pin, hal::pio::PinDir::Input),
+            (self.i2s_clock_pin, hal::pio::PinDir::Output),
+            (self.i2s_ws_pin, hal::pio::PinDir::Output),
+            (self.i2s_data_pin, hal::pio::PinDir::Input),
         ]);
         let rx_transfer =
             double_buffer::Config::new((dma_channel_1, dma_channel_2), rx, rx_buf_1).start();
         let rx_transfer = rx_transfer.write_next(rx_buf_2);
         sm.start();
-        INMP441 {
-            dma_transfer: Some(rx_transfer),
-        }
+        self.dma_transfer = Some(rx_transfer);
     }
 
     pub fn read(&mut self, buffer: &mut [i32; 1024]) {
