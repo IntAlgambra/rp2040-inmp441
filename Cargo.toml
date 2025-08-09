@@ -1,0 +1,15 @@
+[package]
+name = "rp2040-inmp441"
+description = "Driver for the INMP441 I2S MEMS microphone for the RP2040 microcontroller."
+version = "0.1.0"
+authors = ["Ivan Feoktistov <intfort.tales@proton.me>"]
+edition = "2021"
+repository = "https://github.com/IntAlgambra/rp2040-inmp441"
+license = "MIT OR Apache-2.0 OR Zlib"
+keywords = ["I2S", "RP2040", "PIO", "INMP441"]
+categories = ["multimedia::audio"]
+
+[dependencies]
+cortex-m = "0.7.7"
+pio = "0.3.0"
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", features = ["binary-info", "critical-section-impl", "rt", "defmt"] }
