@@ -5,15 +5,9 @@ use pio::pio_asm;
 use rp2040_hal as hal;
 use rp2040_hal::dma::double_buffer::{Transfer, WriteNext};
 use rp2040_hal::dma::{double_buffer, SingleChannel};
-use rp2040_hal::pio::{
-    PIOExt, Rx, ShiftDirection, StateMachineIndex, UninitStateMachine, PIO,
-};
+use rp2040_hal::pio::{PIOExt, Rx, ShiftDirection, StateMachineIndex, UninitStateMachine, PIO};
 
-pub struct INMP441<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel>
-where
-    CH1: SingleChannel,
-    CH2: SingleChannel,
-{
+pub struct INMP441<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel> {
     dma_transfer: Option<
         Transfer<
             CH1,
@@ -36,6 +30,8 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel>
         sm: UninitStateMachine<(P, S)>,
         dma_channel_1: CH1,
         dma_channel_2: CH2,
+        system_clock_freq: u32,
+        sampling_rate: u32,
     ) -> INMP441<P, S, CH1, CH2> {
         let program = pio_asm!(
             // 0 | 00: ws 0 clock 0
@@ -57,7 +53,7 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel>
             ".wrap",
         );
         let installed = pio.install(&program.program).unwrap();
-        let (int, frac) = (20, 88); // 125_000_000 / ((20 + 88/256) * 64 * 2) = 48000 (well almost)
+        let (int, frac) = Self::calculate_pio_clock_dividers(system_clock_freq, sampling_rate);
         let (mut sm, rx, _) = hal::pio::PIOBuilder::from_installed_program(installed)
             .side_set_pin_base(ws_pin)
             .in_pin_base(data_pin)
@@ -95,14 +91,24 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel>
         }
     }
 
+    fn calculate_pio_clock_dividers(system_clock_hz: u32, sample_rate: u32) -> (u16, u8) {
+        // formula for calculating int and frac:
+        // system_clock_freq / ((int + frac/256) * 64 * 2) = sample_rate
+        // every pio program cycle needs 64 i2s clock cycle (32 for left channel + 32 for right channel)
+        // every i2s clock cycle - 2 pio program instructions (1 clock pin low + 1 clock pin high)
+        let combined = system_clock_hz as f32 / (sample_rate as f32 * 64. * 2.);
+        let int = combined as u16;
+        let frac = ((combined - int as f32) * 256.) as u8;
+        (int, frac)
+    }
+
     pub fn ready(&mut self) -> bool {
-        let mut result = false;
-        let transfer = self.dma_transfer.take().unwrap();
-        if transfer.is_done() {
-            result = true;
-        };
-        self.dma_transfer = Some(transfer);
-        result
+        if let Some(transfer) = &self.dma_transfer {
+            if transfer.is_done() {
+                return true;
+            }
+        }
+        false
     }
 
     fn convert_i24_to_i32(reading: u32) -> i32 {
