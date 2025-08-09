@@ -1,26 +1,25 @@
 #![no_std]
 
-use cortex_m::singleton;
 use pio::pio_asm;
 use rp2040_hal as hal;
 use rp2040_hal::dma::double_buffer::{Transfer, WriteNext};
 use rp2040_hal::dma::{double_buffer, SingleChannel};
 use rp2040_hal::pio::{PIOExt, Rx, ShiftDirection, StateMachineIndex, UninitStateMachine, PIO};
 
-pub struct INMP441<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel> {
+pub struct INMP441<
+    P: PIOExt,
+    S: StateMachineIndex,
+    CH1: SingleChannel,
+    CH2: SingleChannel,
+    const N: usize,
+> {
     dma_transfer: Option<
-        Transfer<
-            CH1,
-            CH2,
-            Rx<(P, S)>,
-            &'static mut [u32; 1024],
-            WriteNext<&'static mut [u32; 1024]>,
-        >,
+        Transfer<CH1, CH2, Rx<(P, S)>, &'static mut [u32; N], WriteNext<&'static mut [u32; N]>>,
     >,
 }
 
-impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel>
-    INMP441<P, S, CH1, CH2>
+impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, const N: usize>
+    INMP441<P, S, CH1, CH2, N>
 {
     pub fn new(
         clck_pin: u8,
@@ -30,9 +29,11 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel>
         sm: UninitStateMachine<(P, S)>,
         dma_channel_1: CH1,
         dma_channel_2: CH2,
+        rx_buf_1: &'static mut [u32; N],
+        rx_buf_2: &'static mut [u32; N],
         system_clock_freq: u32,
         sampling_rate: u32,
-    ) -> INMP441<P, S, CH1, CH2> {
+    ) -> INMP441<P, S, CH1, CH2, N> {
         let program = pio_asm!(
             // 0 | 00: ws 0 clock 0
             // 1 | 01: ws 1 clock 0
@@ -65,8 +66,6 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel>
             (ws_pin, hal::pio::PinDir::Output),
             (data_pin, hal::pio::PinDir::Input),
         ]);
-        let rx_buf_1 = singleton!(: [u32; 1024] = [0; 1024]).unwrap();
-        let rx_buf_2 = singleton!(: [u32; 1024] = [0; 1024]).unwrap();
         let rx_transfer =
             double_buffer::Config::new((dma_channel_1, dma_channel_2), rx, rx_buf_1).start();
         let rx_transfer = rx_transfer.write_next(rx_buf_2);
