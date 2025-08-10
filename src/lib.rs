@@ -4,7 +4,9 @@ use pio::pio_asm;
 use rp2040_hal as hal;
 use rp2040_hal::dma::double_buffer::{Transfer, WriteNext};
 use rp2040_hal::dma::{double_buffer, SingleChannel};
-use rp2040_hal::pio::{PIOExt, Rx, ShiftDirection, StateMachineIndex, UninitStateMachine, PIO};
+use rp2040_hal::pio::{
+    InstalledProgram, PIOExt, Rx, ShiftDirection, StateMachineIndex, UninitStateMachine, PIO,
+};
 
 pub enum DriverMode {
     MonoLeft,
@@ -31,6 +33,7 @@ pub struct INMP441<
     i2s_data_pin: u8,
     system_clock_freq: u32,
     sampling_rate: u32,
+    mode: DriverMode,
 }
 
 impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, const N: usize>
@@ -42,6 +45,7 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
         data_pin: u8,
         system_clock_freq: u32,
         sampling_rate: u32,
+        mode: DriverMode,
     ) -> INMP441<P, S, CH1, CH2, N> {
         INMP441 {
             dma_transfer: None,
@@ -50,6 +54,78 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
             i2s_data_pin: data_pin,
             system_clock_freq,
             sampling_rate,
+            mode,
+        }
+    }
+
+    fn install_program(&self, pio: &mut PIO<P>) -> InstalledProgram<P> {
+        match self.mode {
+            DriverMode::Stereo => {
+                let program = pio_asm!(
+                    // 0 | 00: ws 0 clock 0
+                    // 1 | 01: ws 1 clock 0
+                    // 2 | 10: ws 0 clock 1
+                    // 3 | 11: ws 1 clock 1
+                    ".side_set 2", // each instruction must set 1 bit
+                    ".wrap_target",
+                    "set y 30 side 0" // set bit counter clock and ws 0
+                    "push noblock side 2" // pushing right channel data
+                    "lp1:"
+                    "  in pins 1 side 0"
+                    "  jmp y-- lp1 side 2"
+                    "set y 30 side 1" // 31 minus 2 cycles (1 for pushing data, one for clock sync)
+                    "push noblock side 3" // pushing left channel data
+                    "lp2:"
+                    "  in pins 1 side 1"
+                    "  jmp y-- lp2 side 3"
+                    ".wrap",
+                );
+                pio.install(&program.program).unwrap()
+            }
+            DriverMode::MonoLeft => {
+                let program = pio_asm!(
+                    // 0 | 00: ws 0 clock 0
+                    // 1 | 01: ws 1 clock 0
+                    // 2 | 10: ws 0 clock 1
+                    // 3 | 11: ws 1 clock 1
+                    ".side_set 2", // each instruction must set 1 bit
+                    ".wrap_target",
+                    "set y 30 side 0" // set bit counter clock and ws 0
+                    "nop side 2" // pushing right channel data
+                    "lp1:"
+                    "  in pins 1 side 0"
+                    "  jmp y-- lp1 side 2"
+                    "set y 30 side 1" // 31 minus 2 cycles (1 for pushing data, one for clock sync)
+                    "push noblock side 3" // pushing left channel data
+                    "lp2:"
+                    "  nop side 1"
+                    "  jmp y-- lp2 side 3"
+                    ".wrap",
+                );
+                pio.install(&program.program).unwrap()
+            }
+            DriverMode::MonoRight => {
+                let program = pio_asm!(
+                    // 0 | 00: ws 0 clock 0
+                    // 1 | 01: ws 1 clock 0
+                    // 2 | 10: ws 0 clock 1
+                    // 3 | 11: ws 1 clock 1
+                    ".side_set 2", // each instruction must set 1 bit
+                    ".wrap_target",
+                    "set y 30 side 0" // set bit counter clock and ws 0
+                    "push noblock side 2" // pushing right channel data
+                    "lp1:"
+                    "  nop side 0"
+                    "  jmp y-- lp1 side 2"
+                    "set y 30 side 1" // 31 minus 2 cycles (1 for pushing data, one for clock sync)
+                    "nop side 3" // pushing left channel data
+                    "lp2:"
+                    "  in pins 1 side 1"
+                    "  jmp y-- lp2 side 3"
+                    ".wrap",
+                );
+                pio.install(&program.program).unwrap()
+            }
         }
     }
 
@@ -62,26 +138,7 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
         rx_buf_1: &'static mut [u32; N],
         rx_buf_2: &'static mut [u32; N],
     ) {
-        let program = pio_asm!(
-            // 0 | 00: ws 0 clock 0
-            // 1 | 01: ws 1 clock 0
-            // 2 | 10: ws 0 clock 1
-            // 3 | 11: ws 1 clock 1
-            ".side_set 2", // each instruction must set 1 bit
-            ".wrap_target",
-            "set y 30 side 0" // set bit counter clock and ws 0
-            "push noblock side 2" // pushing right channel data
-            "lp1:"
-            "  in pins 1 side 0"
-            "  jmp y-- lp1 side 2"
-            "set y 30 side 1" // 31 minus 2 cycles (1 for pushing data, one for clock sync)
-            "push noblock side 3" // pushing left channel data
-            "lp2:"
-            "  in pins 1 side 1"
-            "  jmp y-- lp2 side 3"
-            ".wrap",
-        );
-        let installed = pio.install(&program.program).unwrap();
+        let installed = self.install_program(pio);
         let (int, frac) =
             Self::calculate_pio_clock_dividers(self.system_clock_freq, self.sampling_rate);
         let (mut sm, rx, _) = hal::pio::PIOBuilder::from_installed_program(installed)
