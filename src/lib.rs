@@ -14,8 +14,10 @@ pub enum DriverMode {
     Stereo,
 }
 
+#[derive(Debug)]
 pub enum DriverError {
     NotInitialized,
+    InvalidPins,
 }
 
 pub struct INMP441<
@@ -46,8 +48,13 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
         system_clock_freq: u32,
         sampling_rate: u32,
         mode: DriverMode,
-    ) -> INMP441<P, S, CH1, CH2, N> {
-        INMP441 {
+    ) -> Result<INMP441<P, S, CH1, CH2, N>, DriverError> {
+        // clock pin must be the next pin after ws pin
+        // it is required because of how side set pin works in RP2040 PIO
+        if clck_pin - ws_pin != 1 {
+            return Err(DriverError::InvalidPins);
+        };
+        Ok(INMP441 {
             dma_transfer: None,
             i2s_clock_pin: clck_pin,
             i2s_ws_pin: ws_pin,
@@ -55,7 +62,7 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
             system_clock_freq,
             sampling_rate,
             mode,
-        }
+        })
     }
 
     fn install_program(&self, pio: &mut PIO<P>) -> InstalledProgram<P> {
@@ -159,19 +166,23 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
         self.dma_transfer = Some(rx_transfer);
     }
 
-    pub fn read(&mut self, buffer: &mut [i32; 1024]) {
-        let transfer = self.dma_transfer.take().unwrap();
-        if transfer.is_done() {
-            let (rx_buf, next_rx_transfer) = transfer.wait();
-            for i in 0..rx_buf.len() {
-                let sample = Self::convert_i24_to_i32(rx_buf[i]);
-                buffer[i] = sample;
+    pub fn read(&mut self, buffer: &mut [i32; 1024]) -> Result<(), DriverError> {
+        let transfer = self.dma_transfer.take();
+        if let Some(transfer) = transfer {
+            if transfer.is_done() {
+                let (rx_buf, next_rx_transfer) = transfer.wait();
+                for i in 0..rx_buf.len() {
+                    let sample = Self::convert_i24_to_i32(rx_buf[i]);
+                    buffer[i] = sample;
+                }
+                let rx_transfer = next_rx_transfer.write_next(rx_buf);
+                self.dma_transfer = Some(rx_transfer);
+            } else {
+                self.dma_transfer = Some(transfer);
             }
-            let rx_transfer = next_rx_transfer.write_next(rx_buf);
-            self.dma_transfer = Some(rx_transfer);
-        } else {
-            self.dma_transfer = Some(transfer);
+            return Ok(());
         }
+        Err(DriverError::NotInitialized)
     }
 
     fn calculate_pio_clock_dividers(system_clock_hz: u32, sample_rate: u32) -> (u16, u8) {
@@ -185,13 +196,14 @@ impl<P: PIOExt, S: StateMachineIndex, CH1: SingleChannel, CH2: SingleChannel, co
         (int, frac)
     }
 
-    pub fn ready(&mut self) -> bool {
+    pub fn ready(&mut self) -> Result<bool, DriverError> {
         if let Some(transfer) = &self.dma_transfer {
             if transfer.is_done() {
-                return true;
+                return Ok(true);
             }
+            return Ok(false);
         }
-        false
+        Err(DriverError::NotInitialized)
     }
 
     fn convert_i24_to_i32(reading: u32) -> i32 {
